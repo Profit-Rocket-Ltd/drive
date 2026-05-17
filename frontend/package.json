@@ -74,6 +74,14 @@
   "pnpm": {
     "overrides": {
       "yjs": "13.6.27"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "@parcel/watcher",
+      "@swc/core",
+      "canvas",
+      "core-js",
+      "esbuild",
+      "vue-demi"
+    ]
   }
 }
