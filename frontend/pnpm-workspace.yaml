@@ -1,7 +1,12 @@
-ignoredBuiltDependencies:
-  - "@swc/core"
-  - core-js
-  - vue-demi
-
-onlyBuiltDependencies:
-  - esbuild
+# pnpm settings file (NOT a workspace root — no `packages:` key declared).
+# Required because pnpm v10.26+/v11 fail bench's `yarn install --check-files`
+# postinstall chain on ERR_PNPM_IGNORED_BUILDS unless these native-compile
+# dependencies are explicitly allowed. Equivalent to the deprecated
+# `pnpm.onlyBuiltDependencies` field in package.json (ignored in v11).
+allowBuilds:
+  "@parcel/watcher": true
+  "@swc/core": true
+  canvas: true
+  core-js: true
+  esbuild: true
+  vue-demi: true
