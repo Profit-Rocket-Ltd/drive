@@ -91,18 +91,27 @@ def get_team_invites(team: str):
 
 
 @frappe.whitelist(allow_guest=True)
-def signup(account_request: str, first_name: str, last_name: str | None = None, team: str | None = None):
+def signup(
+    account_request: str,
+    first_name: str,
+    password: str,
+    last_name: str | None = None,
+    team: str | None = None,
+):
+    if not password:
+        frappe.throw("Password is required.")
+
     account_request = frappe.get_doc("Account Request", account_request)
-    if not account_request.invite and frappe.get_website_settings("disable_signup"):
-        frappe.throw("Signing up is disabled on this site.", frappe.PermissionError)
+    if not account_request.invite:
+        if frappe.get_website_settings("disable_signup"):
+            frappe.throw("Signing up is disabled on this site.", frappe.PermissionError)
 
-    if not account_request.login_count:
-        frappe.throw("Please verify the email first.")
+        if not account_request.login_count:
+            frappe.throw("Please verify the email first.")
 
-    user = create_user(account_request.email, first_name, last_name, True)
+    user = create_user(account_request.email, first_name, password, last_name, True)
     account_request.signed_up = 1
     account_request.save(ignore_permissions=True)
-
     team = None
     if account_request.invite:
         invite = frappe.get_doc("Drive User Invitation", account_request.invite)
@@ -117,7 +126,7 @@ def signup(account_request: str, first_name: str, last_name: str | None = None, 
     return {"location": f"/drive/t/{team}" if team else "/drive/"}
 
 
-def create_user(email, first_name, last_name=None, login=False):
+def create_user(email, first_name, password, last_name=None, login=False):
     user = frappe.get_doc(
         {
             "doctype": "User",
@@ -126,24 +135,18 @@ def create_user(email, first_name, last_name=None, login=False):
             "last_name": escape_html(last_name),
             "enabled": 1,
             "user_type": "Website User",
+            "new_password": password,
         }
     )
 
     user.flags.no_welcome_mail = True
-    user.flags.ignore_password_policy = True
     try:
         user.insert(ignore_permissions=True)
     except frappe.DuplicateEntryError:
         frappe.throw("User already exists")
+
     if login:
         frappe.local.login_manager.login_as(user.email)
-    doc = frappe.get_doc(
-        {
-            "doctype": "Drive Settings",
-            "user": email,
-        }
-    )
-    doc.insert()
     return user
 
 
@@ -187,47 +190,23 @@ def oauth_providers():
 
 @frappe.whitelist(allow_guest=True)
 @rate_limit(limit=5, seconds=60)
-def send_otp(email: str, login: bool):
-    disable_signups = signup_disabled()
-    if not login and disable_signups:
+def send_otp(email: str, login: bool = False):
+    if signup_disabled():
         frappe.throw("Signing up is disabled on this site.", frappe.PermissionError)
 
-    is_login = frappe.db.exists(
-        "Account Request",
+    account_request = frappe.get_doc(
         {
+            "doctype": "Account Request",
             "email": email,
-            "signed_up": 1,
-        },
-    )
-    if not is_login:
-        signed_up = 0
-        if login:
-            if not frappe.db.exists("User", email):
-                frappe.throw("This email account is not found." if disable_signups else "Please sign up first.")
-            signed_up = 1
-
-        account_request = frappe.get_doc(
-            {
-                "doctype": "Account Request",
-                "email": email,
-                "signed_up": signed_up,
-            }
-        ).insert(ignore_permissions=True)
-        account_request.set_otp()
-        try:
-            account_request.send_otp()
-        except:
-            frappe.throw("Please setup an email account in Desk.")
-        return account_request.name
-    else:
-        req = frappe.get_doc("Account Request", is_login, ignore_permissions=True)
-        req.set_otp()
-        try:
-            req.send_otp()
-        except:
-            pass
-            # frappe.throw("Please setup an email account in Desk.")
-        return is_login
+            "signed_up": 0,
+        }
+    ).insert(ignore_permissions=True)
+    account_request.set_otp()
+    try:
+        account_request.send_otp()
+    except:
+        frappe.throw("Please setup an email account in Desk.")
+    return account_request.name
 
 
 @frappe.whitelist(allow_guest=True)
@@ -238,8 +217,6 @@ def verify_otp(account_request: str, otp: str):
         frappe.throw("Invalid OTP")
     req.login_count += 1
     req.save(ignore_permissions=True)
-    if req.signed_up:
-        frappe.local.login_manager.login_as(req.email)
 
 
 @frappe.whitelist(allow_guest=True)
@@ -314,11 +291,16 @@ def remove_user(team: str, user_id: str):
     frappe.delete_doc("Drive Team Member", drive_team[user_id].name)
 
 
-# SECURITY: send user data with files
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 @default_team
-def get_all_users(team: str):
-    teams = [team] if team != "all" else get_teams()
+def get_team_users(team: str):
+    user_teams = get_teams()
+    if team == "all":
+        teams = user_teams
+    elif team in user_teams:
+        teams = [team]
+    else:
+        frappe.throw(_("You don't have access to this team."), frappe.PermissionError)
 
     team_users = {}
     for team in teams:
@@ -339,23 +321,6 @@ def get_all_users(team: str):
         u["access_level"] = team_users[u["name"]]
     return users
 
-
-@frappe.whitelist()
-def get_drive_users():
-    users = frappe.get_all(
-        doctype="User",
-        filters=[
-            ["user_type", "=", "Drive User"],
-            ["enabled", "=", 1],
-        ],
-        fields=[
-            "name",
-            "email",
-            "full_name",
-            "user_image",
-        ],
-    )
-    return users
 
 
 @frappe.whitelist(allow_guest=True)
@@ -448,21 +413,3 @@ def after_request(request):
 @frappe.whitelist(allow_guest=True)
 def signup_disabled():
     return frappe.get_website_settings("disable_signup")
-
-
-# SECURITY: all user data is available
-@frappe.whitelist(allow_guest=True)
-def get_drive_users():
-    users = frappe.get_all(
-        doctype="User",
-        filters=[
-            ["enabled", "=", 1],
-        ],
-        fields=[
-            "name",
-            "email",
-            "full_name",
-            "user_image",
-        ],
-    )
-    return users
