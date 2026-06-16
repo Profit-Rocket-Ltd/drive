@@ -4,7 +4,13 @@ import frappe
 
 no_cache = 1
 
-TITLES = {"login": "Login", "signup": "Create an Account"}
+TITLES = {"signup": "Create an Account"}
+
+
+def get_desk_theme():
+    if frappe.session.user == "Guest":
+        return "Light"
+    return frappe.get_cached_value("User", frappe.session.user, "desk_theme") or "Light"
 
 
 def get_context():
@@ -13,6 +19,7 @@ def get_context():
     context = frappe._dict()
     context.boot = get_boot()
     context.boot.csrf_token = csrf_token
+    context.desk_theme = context.boot.desk_theme
     context.csrf_token = csrf_token
     context.site_name = frappe.local.site
 
@@ -28,9 +35,11 @@ def get_context():
         context.description = "Open this online."
         # Ideally add thumbnail, but that might break if there's no thumbnail
         try:
-            [title, owner, is_group] = frappe.get_cached_value("Drive File", parts[1], ["title", "owner", "is_group"])
-            context.title = "Folder - " + title if is_group else title
-            context.description = "By " + frappe.get_cached_value("User", owner, "full_name")
+            [file_name, owner, is_folder] = frappe.get_cached_value(
+                "File", parts[1], ["file_name", "owner", "is_folder"]
+            )
+            context.title = "Folder - " + file_name if is_folder else file_name
+            context.description = "Owned by " + frappe.get_cached_value("User", owner, "full_name")
         except:
             pass
 
@@ -54,6 +63,7 @@ def get_boot():
             "default_route": get_default_route(),
             "site_name": frappe.local.site,
             "read_only_mode": frappe.flags.read_only,
+            "desk_theme": get_desk_theme(),
         }
     )
 
