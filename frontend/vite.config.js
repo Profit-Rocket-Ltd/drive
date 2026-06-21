@@ -4,7 +4,6 @@ import path from 'path'
 import { getLocalFrappeUIDevConfig, importFrappeUIPlugin } from './vite-helpers'
 
 export default defineConfig(async ({ mode }) => {
-  console.log(mode)
   const { useLocalFrappeUI, localFrappeUIAliases } = getLocalFrappeUIDevConfig({
     mode,
     rootDir: __dirname,
@@ -30,10 +29,18 @@ export default defineConfig(async ({ mode }) => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, 'src'),
+        '@icons': path.resolve(__dirname, '../drive/public/images/icons'),
         'tailwind.config.js': path.resolve(__dirname, 'tailwind.config.js'),
         ...localFrappeUIAliases,
       },
-      dedupe: ['yjs'],
+      dedupe: [],
+    },
+    css: {
+      lightningcss: {
+        customAtRules: {
+          tailwind: { prelude: '<custom-ident>' },
+        },
+      },
     },
     build: {
       sourcemap: true,
@@ -54,7 +61,7 @@ export default defineConfig(async ({ mode }) => {
       external: ['html2canvas', 'dompurify'],
     },
     optimizeDeps: {
-      include: ['frappe-ui > feather-icons', 'frappe-ui > lowlight', 'yjs', 'tailwind.config.js'],
+      include: ['tailwind.config.js'],
     },
   }
   return config

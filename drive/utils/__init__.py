@@ -5,46 +5,43 @@ from functools import wraps
 from pathlib import Path
 
 import frappe
-from bs4 import BeautifulSoup
 from pypika import Field, functions as fn
 import mimemapper
 
 DriveFile = frappe.qb.DocType("File")
 
-# File.status (Select). Active = live, Trashed = in trash, Removed = pending hard-delete.
 STATUS_ACTIVE = "Active"
 STATUS_TRASHED = "Trashed"
 STATUS_REMOVED = "Removed"
 
-# A drive File whose `content_doctype` is "File" points at another framework File
-# row (the library / attachment-copy flow) rather than holding its own content.
 ATTACHMENT_CONTENT_DOCTYPE = "File"
+WRITER_CONTENT_DOCTYPE = "Writer Document"
+PRESENTATION_CONTENT_DOCTYPE = "Presentation"
 
-# `kind` — what a row in a Drive listing actually is, relative to Drive. This is a
-# mutually-exclusive, exhaustive partition (NOT the MIME `file_kinds` filter):
-#   native    — Drive owns the entity's identity & storage (incl. folders, Writer
-#               Documents, Presentations). Rename / move / share allowed.
-#   reference  — a Drive row that points at another framework File ("open original").
-#   foreign    — a stock framework File surfaced read-only in Drive ("open in desk").
-#   virtual    — a fabricated grouping node (Doctype→Doc tree), not a File row.
-# The old `modifiable` / `is_attachment` booleans are just projections of this:
-#   modifiable ≡ kind == native,  is_attachment ≡ kind == reference.
+# `kind` — how Drive may treat a listing row (NOT the MIME `file_kinds` filter):
+#   native   — Drive-managed team file. Rename / move / share allowed.
+#   readonly — Shown in Drive but not managed here. Sub-cases use existing fields:
+#                no `team` → site file ("Open in Desk")
+#                content_doctype == "File" → attachment ref ("Go to original")
+#   virtual  — Fabricated folder for the attachments browser (not a DB row).
 KIND_NATIVE = "native"
-KIND_REFERENCE = "reference"
-KIND_FOREIGN = "foreign"
+KIND_READONLY = "readonly"
 KIND_VIRTUAL = "virtual"
 
 
-def entity_kind(row):
-    """Classify a real `File` listing row. See the `kind` partition above.
+def is_site_file(entity):
+    """Site files live outside any Drive team; they defer to framework storage & perms."""
+    team = entity.get("team") if isinstance(entity, dict) else entity.team
+    return not team
 
-    `virtual` grouping nodes are fabricated in `list.get_attachments` and tagged
-    with `kind` at construction, so they never reach this function.
+
+def entity_kind(row):
+    """Classify a real `File` listing row. See `kind` above.
+
+    `virtual` nodes are built in `list.get_attachments` and never reach here.
     """
-    if not row["is_drive_file"]:
-        return KIND_FOREIGN
-    if row["content_doctype"] == ATTACHMENT_CONTENT_DOCTYPE:
-        return KIND_REFERENCE
+    if is_site_file(row) or row.get("content_doctype") == ATTACHMENT_CONTENT_DOCTYPE:
+        return KIND_READONLY
     return KIND_NATIVE
 MIME_LIST_MAP = {
     "Image": [
@@ -138,16 +135,27 @@ FILE_FIELDS = [
     "creation",
     fn.Coalesce(Field("file_modified"), DriveFile.modified).as_("modified"),
     "owner",
-    "is_drive_file",
     "attached_to_doctype",
     "attached_to_name",
 ]
 
 
+def hide_storage_key(row):
+    """Blank file_url unless the client needs it as a real URL.
+
+    For managed files it's the raw storage key, which leaks the owner's path;
+    only Link/Presentation/site files use it client-side.
+    """
+    if row.get("file_type") not in ("Link", "Presentation") and not is_site_file(row):
+        row["file_url"] = None
+    return row
+
+
 def get_home_folder(team):
+    team_filter = DriveFile.team.isnull() if not team else (DriveFile.team == team)
     ls = (
         frappe.qb.from_(DriveFile)
-        .where(((DriveFile.team == team) & DriveFile.folder.isnull()))
+        .where(team_filter & DriveFile.folder.isnull())
         .select(DriveFile.name, DriveFile.file_url)
         .run(as_dict=True)
     )
@@ -348,58 +356,34 @@ def create_drive_file(
     mime_type=None,
     file_size=0,
     file_modified=None,
-    document=None,
+    content_doctype=None,
+    content_docname=None,
     owner=None,
 ):
-    drive_file = frappe.get_doc(
-        {
-            "doctype": "File",
-            "is_drive_file": 1,
-            "is_private": 1,
-            "team": team,
-            "file_name": file_name,
-            "folder": parent,
-            "file_size": file_size,
-            "file_type": file_type,
-            "mime_type": mime_type,
-            "doc": document,
-            "is_folder": file_type == "Folder",
-            "file_modified": (datetime.fromtimestamp(file_modified) if file_modified else frappe.utils.now()),
-        }
-    )
+    values = {
+        "doctype": "File",
+        "is_private": 1,
+        "team": team,
+        "file_name": file_name,
+        "folder": parent,
+        "file_size": file_size,
+        "file_type": file_type,
+        "mime_type": mime_type,
+        "is_folder": file_type == "Folder",
+        "file_modified": (datetime.fromtimestamp(file_modified) if file_modified else frappe.utils.now()),
+    }
+    if content_doctype:
+        values["content_doctype"] = content_doctype
+        values["content_docname"] = content_docname
+    drive_file = frappe.get_doc(values)
     drive_file.flags.file_created = True
     drive_file.insert(ignore_permissions=True)
-    path = entity_path if isinstance(entity_path, str) else entity_path(drive_file)
+    path = entity_path(drive_file) if callable(entity_path) else entity_path
     drive_file.file_url = str(path) if path else ""
     drive_file.save(ignore_permissions=True)
     if owner:
         drive_file.db_set("owner", owner, update_modified=False)
     return drive_file
-
-
-def extract_mentions(content):
-    soup = BeautifulSoup(content, "html.parser")
-    mentions = []
-    for span in soup.find_all("span", class_="mention", attrs={"data-type": "mention"}):
-        data_id = span.get("data-id")
-        if data_id:
-            mentions.append(data_id)
-    return mentions
-
-
-def strip_comment_spans(html: str) -> str:
-    """
-    Remove only <span> tags with a data-comment-id attribute.
-    Keeps their inner content.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-
-    for span in soup.find_all("span", attrs={"data-comment-id": True}):
-        span.unwrap()
-    for span in soup.find_all("img"):
-        span.unwrap()
-
-    return str(soup)
 
 
 @frappe.whitelist()
@@ -504,3 +488,32 @@ def get_upload_path(team_path, file_name):
     if not os.path.exists(uploads_path):
         uploads_path.mkdir()
     return uploads_path / file_name
+
+
+@default_team
+def create_file(
+    title="Untitled",
+    parent=None,
+    path=None,
+    mime_type=None,
+    file_type=None,
+    content_doctype=None,
+    content_docname=None,
+    team=None,
+):
+    """Convenience wrapper for external apps (e.g. Slides, Writer) to create a Drive file."""
+    if not parent:
+        parent = get_home_folder(team).name
+    else:
+        team = frappe.db.get_value("File", parent, "team")
+
+    return create_drive_file(
+        team,
+        title,
+        parent,
+        file_type or "Unknown",
+        lambda _: path,
+        mime_type=mime_type,
+        content_doctype=content_doctype,
+        content_docname=content_docname,
+    )

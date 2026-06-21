@@ -1,7 +1,7 @@
 <template>
   <div
     v-if="error"
-    class="max-w-[450px] h-fit self-center p-10 dark:border dark:border-ink-white bg-surface-white rounded-md text-neutral-100 text-xl text-center font-medium shadow-xl flex flex-col justify-center items-center gap-4"
+    class="max-w-[450px] h-fit self-center p-10 border border-outline-gray-2 bg-surface-white rounded-md text-xl text-center font-medium shadow-xl flex flex-col justify-center items-center gap-4"
   >
     <LucideAlertCircle class="size-8 text-ink-gray-8" />
     <span class="text-ink-gray-9">Cannot open file</span>
@@ -13,13 +13,14 @@
   <component :is="previewComponent" v-else :preview-entity="previewEntity" />
 </template>
 <script setup>
-import MSOfficePreview from '@/components/FileTypePreview/MSOfficePreview.vue'
-import ImagePreview from '@/components/FileTypePreview/ImagePreview.vue'
-import PDFPreview from './FileTypePreview/PDFPreview.vue'
-import VideoPreview from './FileTypePreview/VideoPreview.vue'
-import TextPreview from './FileTypePreview/TextPreview.vue'
-import AudioPreview from '@/components/FileTypePreview/AudioPreview.vue'
-import { computed } from 'vue'
+import { computed, defineAsyncComponent } from 'vue'
+
+const MSOfficePreview = defineAsyncComponent(() => import('@/components/FileTypePreview/MSOfficePreview.vue'))
+const ImagePreview = defineAsyncComponent(() => import('@/components/FileTypePreview/ImagePreview.vue'))
+const PDFPreview = defineAsyncComponent(() => import('./FileTypePreview/PDFPreview.vue'))
+const VideoPreview = defineAsyncComponent(() => import('./FileTypePreview/VideoPreview.vue'))
+const TextPreview = defineAsyncComponent(() => import('./FileTypePreview/TextPreview.vue'))
+const AudioPreview = defineAsyncComponent(() => import('@/components/FileTypePreview/AudioPreview.vue'))
 import LucideAlertCircle from '~icons/lucide/alert-circle'
 import { diskSettings } from '@/resources/permissions'
 import store from '@/store'

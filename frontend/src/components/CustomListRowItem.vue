@@ -5,7 +5,7 @@
         v-if="!imgLoaded"
         loading="lazy"
         class="h-[16px] w-[16px] rounded-sm"
-        :src="backupLink"
+        :src="fallback"
         :draggable="false"
       />
       <img
@@ -36,7 +36,7 @@
           name="star"
           width="16"
           height="16"
-          class="my-auto stroke-amber-500 fill-amber-500"
+          class="my-auto text-ink-amber-3 stroke-current fill-current"
         />
         <component :is="column.suffix({ row })" v-if="column.suffix" />
       </div>
@@ -55,14 +55,7 @@ const props = defineProps({
   contextMenu: Function,
 })
 
-let src, imgLoaded, thumbnailLink, backupLink, _
-
-if (props.column.prefix && props.column.key === 'file_name') {
-  ;[thumbnailLink, backupLink, _] = props.column.prefix({
-    row: props.row,
-  })
-
-  src = ref(thumbnailLink || backupLink)
-  imgLoaded = ref(false)
-}
+const isFileColumn = props.column.prefix && props.column.key === 'file_name'
+const { src, fallback } = isFileColumn ? props.column.prefix({ row: props.row }) : {}
+const imgLoaded = ref(false)
 </script>

@@ -45,15 +45,11 @@ import { Dialog, Button } from 'frappe-ui'
 import { isAdmin } from '@/resources/permissions'
 import ProfileSettings from '@/components/Settings/ProfileSettings.vue'
 import StorageSettings from './StorageSettings.vue'
-import TemplateSettings from './TemplateSettings.vue'
 import UserListSettings from './UserListSettings.vue'
 import LucideCloudCog from '~icons/lucide/cloud-cog'
-import LucideFileText from '~icons/lucide/file-text'
 import LucideChartBar from '~icons/lucide/chart-bar'
-import LucideTag from '~icons/lucide/tag'
 import LucideUser from '~icons/lucide/user'
 import LucideUserPlus from '~icons/lucide/user-plus'
-import TagSettings from './TagSettings.vue'
 import BackendSettings from './BackendSettings.vue'
 
 const tabs = [
@@ -73,20 +69,10 @@ const tabs = [
     component: markRaw(StorageSettings),
   },
   {
-    label: 'Tags',
-    icon: LucideTag,
-    component: markRaw(TagSettings),
-  },
-  {
     enabled: computed(() => isAdmin.data?.is_admin || false),
     label: 'Storage',
     icon: LucideCloudCog,
     component: markRaw(BackendSettings),
-  },
-  {
-    label: 'Templates',
-    icon: LucideFileText,
-    component: markRaw(TemplateSettings),
   },
 ]
 if (!isAdmin.data) isAdmin.fetch()

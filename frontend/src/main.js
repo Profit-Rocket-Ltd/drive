@@ -16,16 +16,12 @@ import './index.css'
 import { initSocket } from './socket'
 import focusDirective from './utils/focus'
 import translation from './translation'
-import { allUsers } from '@/resources/permissions'
+import { setupTheme } from './utils/setupTheme'
 
 const app = createApp(App)
 setConfig('resourceFetcher', frappeRequest)
 app.config.unwrapInjectedRef = true
 app.config.globalProperties.emitter = emitter
-app.config.globalProperties.$user = (user) => {
-  if (!allUsers.fetched && !allUsers.loading) allUsers.fetch({ team: 'all' })
-  return allUsers.data?.find?.((k) => k.name === user)
-}
 
 app.provide('emitter', emitter)
 app.use(router)
@@ -52,4 +48,4 @@ setConfig('resourceFetcher', (options) => {
 app.component('FormControl', FormControl)
 app.component('Button', Button)
 
-app.mount('#app')
+setupTheme().then(() => app.mount('#app'))

@@ -1,12 +1,10 @@
 import json
 import re
-from datetime import timedelta
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
 import frappe
-import jwt
-# import magic
 import mimemapper
 from pypika import Order
 from werkzeug.utils import secure_filename, send_file
@@ -22,18 +20,18 @@ from drive.utils import (
     update_file_size,
     get_new_file_name,
     validate_filename,
-    get_upload_path,
+    is_site_file,
     ATTACHMENT_CONTENT_DOCTYPE,
     STATUS_ACTIVE,
     STATUS_TRASHED,
 )
 from drive.utils.api import prettify_file
-from drive.utils.files import FileManager, storage_key, get_s3_key, get_s3_url
+from drive.utils.files import FileManager, get_s3_key, get_s3_url
 from drive.utils.users import mark_as_viewed
 
 from .permissions import get_teams, user_has_permission
 
-FORBIDDEN_DOWNLOAD_TYPES = ["Folder", "Link", "Document"]
+FORBIDDEN_DOWNLOAD_TYPES = ["Folder", "Link", "Document", "Presentation"]
 
 
 @frappe.whitelist(allow_guest=True)
@@ -81,7 +79,7 @@ def upload_file(
     file = frappe.request.files["file"]
     file_name = get_new_file_name(file.filename, parent)
     upload_session = frappe.form_dict.uuid
-    temp_path = get_upload_path(storage_key(home_folder["file_url"]), f"{upload_session}_{secure_filename(file_name)}")
+    temp_path = get_upload_path(f"{upload_session}_{secure_filename(file_name)}")
     with temp_path.open("ab") as f:
         f.seek(offset)
         f.write(file.stream.read())
@@ -95,9 +93,6 @@ def upload_file(
         frappe.throw("You're out of storage!", ValueError)
 
     mime_type = mimemapper.get_mime_type(str(temp_path), native_first=False)
-    if mime_type is None:
-        mime_type = magic.from_buffer(open(temp_path, "rb").read(2048), mime=True)
-
     file_type = get_file_type(mime_type)
     manager = FileManager()
 
@@ -133,57 +128,30 @@ def upload_file(
 @frappe.whitelist(allow_guest=True)
 def get_thumbnail(entity_name: str):
     drive_file = frappe.get_cached_doc("File", entity_name)
-    if not drive_file or drive_file.is_folder:
-        return
 
+    # Permission first, so callers can't probe type/existence of files they can't read.
     if not user_has_permission(drive_file, "read"):
         frappe.throw("No permission", frappe.PermissionError)
 
-    thumbnail_data = None
-    if frappe.cache().exists(entity_name):
-        try:
-            thumbnail_data = frappe.cache().get_value(entity_name)
-        except:
-            frappe.cache().delete_value(entity_name)
-    if not thumbnail_data:
-        manager = FileManager()
-        try:
-            if drive_file.file_type == "Markdown":
-                with manager.get_file(drive_file) as f:
-                    thumbnail_data = f.read()[:1000].decode("utf-8").replace("\n", "<br/>")
-            elif drive_file.file_type == "Document":
-                html = frappe.get_value("Writer Document", drive_file.content_docname, "raw_content")
-                thumbnail_data = html[:1000] if html else ""
-            elif drive_file.mime_type == "frappe/slides":
-                thumbnail_url = frappe.call(
-                    "slides.slides.doctype.presentation.presentation.get_presentation_thumbnail",
-                    presentation_name=drive_file.path,
-                )
-                if not thumbnail_url:
-                    return ""
-                frappe.local.response["type"] = "redirect"
-                frappe.local.response["location"] = thumbnail_url
-                return
-            else:
-                thumbnail = manager.get_thumbnail(drive_file.team, entity_name)
-                thumbnail_data = BytesIO(thumbnail.read())
-                thumbnail.close()
-        except:
-            return ""
+    # Thumbnails only exist for these types; bail before touching storage otherwise.
+    if drive_file.is_folder or drive_file.file_type not in ("Image", "Video", "PDF"):
+        return ""
 
-    if thumbnail_data:
-        frappe.cache().set_value(entity_name, thumbnail_data, expires_in_sec=60 * 60)
+    try:
+        thumbnail = FileManager().get_thumbnail(drive_file.team, entity_name)
+        thumbnail_data = BytesIO(thumbnail.read())
+        thumbnail.close()
+    except Exception:
+        return ""
 
-    if isinstance(thumbnail_data, BytesIO):
-        response = Response(
-            wrap_file(frappe.request.environ, thumbnail_data),
-            direct_passthrough=True,
-        )
-        response.headers.set("Content-Type", "image/jpeg")
-        response.headers.set("Content-Disposition", "inline", filename=entity_name)
-        return response
-    else:
-        return thumbnail_data
+    response = Response(
+        wrap_file(frappe.request.environ, thumbnail_data),
+        direct_passthrough=True,
+    )
+    response.headers.set("Content-Type", "image/webp")
+    response.headers.set("Cache-Control", "private, max-age=3600")
+    response.headers.set("Content-Disposition", "inline", filename=entity_name)
+    return response
 
 
 
@@ -280,7 +248,6 @@ def create_link(team: str, file_name: str, link: str, parent: str | None = None)
             "file_type": "Link",
             "file_modified": frappe.utils.now_datetime(),
             "folder": parent,
-            "is_drive_file": 1,
         }
     )
     drive_file.insert()
@@ -292,36 +259,29 @@ def create_link(team: str, file_name: str, link: str, parent: str | None = None)
 def create_auth_token(entity_name: str):
     if not user_has_permission(entity_name, "read"):
         raise frappe.PermissionError("You do not have permission to view this file")
-    settings = frappe.get_single("Drive Disk Settings")
-    key = settings.get_password("jwt_key", raise_exception=False)
-    return jwt.encode(
-        {"name": entity_name, "expiry": (frappe.utils.now_datetime() + timedelta(minutes=1)).timestamp()},
-        key=key,
-    )
+    token = frappe.get_doc(
+        {
+            "doctype": "Drive Token",
+            "file": entity_name,
+            "user": frappe.session.user,
+            "expiry": frappe.utils.add_to_date(None, minutes=5),
+        }
+    ).insert(ignore_permissions=True)
+    return token.name
 
 
 @frappe.whitelist(allow_guest=True)
-def get_file_content(entity_name: str, trigger_download: bool = False, jwt_token: str | None = None):
+def get_file_content(entity_name: str, trigger_download: bool = False, token: str | None = None):
     """
-    Stream file content and optionally trigger download
-
-    :param entity_name: Document-name of the file whose content is to be streamed
-    :param trigger_download: 1 to trigger the "Save As" dialog. Defaults to 0
-    :type trigger_download: int
-    :raises ValueError: If the DriveEntity doc does not exist or is not a file
-    :raises PermissionError: If the current user does not have permission to read the file
-    :raises FileLockedError: If the file has been writer-locked
-
-    JWT tokens are a vulnerability - if used, they bypass all permissions and give the file.
-    Only the file name and secret token is needed to get access to all files.
-
-    A more secure way would be a DB-stored auth token that can only be created by someone with read access.
+    Central function to get files.
     """
-    if jwt_token:
-        settings = frappe.get_single("Drive Disk Settings")
-        auth = jwt.decode(jwt_token, key=settings.get_password("jwt_key"), algorithms=["HS256"])
-        if frappe.utils.now_datetime().timestamp() > auth["expiry"] or auth["name"] != entity_name:
+    if token:
+        # Single-use capability minted by create_auth_token, for cookieless
+        # fetches (e.g. the Office Online preview).
+        auth = frappe.db.get_value("Drive Token", token, ["file", "expiry"], as_dict=True)
+        if not auth or auth.file != entity_name or frappe.utils.now_datetime() > auth.expiry:
             raise frappe.PermissionError("You do not have permission to view this file")
+        frappe.delete_doc("Drive Token", token, ignore_permissions=True, force=True)
     elif not user_has_permission(entity_name, "read"):
         raise frappe.PermissionError("You do not have permission to view this file")
 
@@ -333,7 +293,7 @@ def get_file_content(entity_name: str, trigger_download: bool = False, jwt_token
             "file_type",
             "status",
             "file_url",
-            "is_drive_file",
+            "team",
         ],
         as_dict=1,
     )
@@ -341,9 +301,9 @@ def get_file_content(entity_name: str, trigger_download: bool = False, jwt_token
     if not file or file.file_type in FORBIDDEN_DOWNLOAD_TYPES or file.status != STATUS_ACTIVE:
         frappe.throw("Not found", frappe.DoesNotExistError)
 
-    if file.file_type == "Document" or not file.is_drive_file:
+    if file.file_type == "Document" or is_site_file(file):
         frappe.local.response["type"] = "redirect"
-        frappe.local.response["location"] = ("/drive/w/" + file.name) if file.is_drive_file else file.file_url
+        frappe.local.response["location"] = file.file_url if is_site_file(file) else ("/drive/w/" + file.name)
         return
 
     return get_file_internal(file, trigger_download)
@@ -379,8 +339,7 @@ def stream_file_content(entity_name: str):
     if not user_has_permission(entity, "read"):
         raise frappe.PermissionError("You do not have permission to view this file")
 
-    if not entity.is_drive_file:
-        #     frappe.local.response = frappe.utils.response.download_private_file(entity.file_url)
+    if is_site_file(entity):
         frappe.local.response["type"] = "redirect"
         frappe.local.response["location"] = entity.file_url
         return
@@ -417,6 +376,129 @@ def stream_file_content(entity_name: str):
     res = Response(data, 206, mimetype=entity.mime_type, direct_passthrough=True)
     res.headers.add("Content-Range", "bytes {0}-{1}/{2}".format(byte1, byte1 + length - 1, size))
     return res
+
+
+class _ZipSink:
+    """A non-seekable sink for `zipfile`. Because it exposes no `seek`/`tell`,
+    zipfile falls back to streaming-friendly data descriptors, letting us yield
+    archive bytes as they're produced instead of buffering the whole zip."""
+
+    def __init__(self):
+        self._chunks = bytearray()
+
+    def write(self, data):
+        self._chunks += data
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def drain(self):
+        chunk = bytes(self._chunks)
+        del self._chunks[:]
+        return chunk
+
+
+def _iter_folder_files(entity_name, prefix=""):
+    """Recursively yield (arcname, file) for downloadable files in a folder.
+
+    Writer documents and links have no underlying blob, so they're skipped.
+    """
+    children = frappe.get_all(
+        "File",
+        filters={"folder": entity_name, "status": STATUS_ACTIVE},
+        fields=["name", "file_name", "is_folder", "file_type", "file_url", "team"],
+    )
+    for child in children:
+        arcname = f"{prefix}{child.file_name}"
+        if child.is_folder:
+            yield from _iter_folder_files(child.name, prefix=f"{arcname}/")
+        elif child.file_type not in FORBIDDEN_DOWNLOAD_TYPES and child.file_url:
+            yield arcname, child
+
+
+def _collect_download_files(entity_names):
+    """Expand the selected top-level entities into (arcname, file) pairs.
+
+    Read permission is checked per top-level entity (Drive's ACL cascades to
+    children); a single folder nests its contents under its own file name.
+    """
+    for name in entity_names:
+        if not user_has_permission(name, "read"):
+            raise frappe.PermissionError("You do not have permission to download this file")
+        entity = frappe.get_value(
+            "File",
+            name,
+            ["name", "file_name", "is_folder", "file_type", "file_url", "team"],
+            as_dict=True,
+        )
+        if not entity:
+            continue
+        if entity.is_folder:
+            yield from _iter_folder_files(entity.name, prefix=f"{entity.file_name}/")
+        elif entity.file_type not in FORBIDDEN_DOWNLOAD_TYPES and entity.file_url:
+            yield entity.file_name, entity
+
+
+def _stream_zip(files):
+    """Generator that yields a ZIP archive built one file at a time, so memory
+    stays flat regardless of the total size."""
+    manager = FileManager()
+    sink = _ZipSink()
+    with zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
+        for arcname, child in files:
+            info = zipfile.ZipInfo(arcname)
+            info.compress_type = zipfile.ZIP_STORED
+            with zf.open(info, "w") as dest:
+                source = manager.get_file(child)
+                try:
+                    while True:
+                        block = source.read(4 * 1024 * 1024)
+                        if not block:
+                            break
+                        dest.write(block)
+                        data = sink.drain()
+                        if data:
+                            yield data
+                finally:
+                    if hasattr(source, "close"):
+                        source.close()
+            data = sink.drain()
+            if data:
+                yield data
+    yield sink.drain()
+
+
+@frappe.whitelist(allow_guest=True)
+def download_folder(entities: str):
+    """Stream a ZIP of one or more Drive entities (folders and/or files).
+
+    Replaces the old client-side JSZip flow, which loaded every file into
+    browser memory and hung on large folders. Here the server streams the
+    archive a file at a time via chunked transfer.
+
+    :param entities: JSON list of File names (the user's selection)
+    """
+    if isinstance(entities, str):
+        entities = frappe.parse_json(entities)
+    if not entities:
+        frappe.throw("Nothing to download", ValueError)
+
+    # Materialise the file list up front so a permission error surfaces as a
+    # clean HTTP error instead of a corrupt, half-streamed zip.
+    files = list(_collect_download_files(entities))
+    if not files:
+        frappe.throw("No downloadable files found", frappe.NotFound)
+
+    if len(entities) == 1:
+        title = frappe.get_value("File", entities[0], "file_name")
+        zip_name = f"{title}.zip"
+    else:
+        zip_name = f"Drive Download {frappe.utils.now()}.zip"
+
+    response = Response(_stream_zip(files), mimetype="application/zip", direct_passthrough=True)
+    response.headers["Content-Disposition"] = f'attachment; filename="{secure_filename(zip_name)}"'
+    return response
 
 
 @frappe.whitelist()
@@ -614,23 +696,23 @@ def search(query: str):
     try:
         result = frappe.db.sql(
             """
-        SELECT  `tabDrive File`.name,
-                `tabDrive File`.file_name,
-                `tabDrive File`.file_type,
-                `tabDrive File`.document,
-                `tabDrive File`.color,
+        SELECT  `tabFile`.name,
+                `tabFile`.file_name,
+                `tabFile`.file_type,
+                `tabFile`.content_doctype,
+                `tabFile`.content_docname,
                 `tabUser`.name AS user_name,
                 `tabUser`.user_image,
                 `tabUser`.full_name
-        FROM `tabDrive File`
-        LEFT JOIN `tabUser` ON `tabDrive File`.`owner` = `tabUser`.`name`
-        WHERE `tabDrive File`.team IN %(teams)s
-            AND `tabDrive File`.`status` = 1
-            AND `tabDrive File`.`folder` <> ''
-            AND MATCH(file_name) AGAINST (%(text)s IN BOOLEAN MODE)
-        GROUP  BY `tabDrive File`.`name`
+        FROM `tabFile`
+        LEFT JOIN `tabUser` ON `tabFile`.`owner` = `tabUser`.`name`
+        WHERE `tabFile`.team IN %(teams)s
+            AND `tabFile`.`status` = %(status)s
+            AND COALESCE(`tabFile`.`folder`, '') <> ''
+            AND MATCH(`tabFile`.file_name) AGAINST (%(text)s IN BOOLEAN MODE)
+        GROUP BY `tabFile`.`name`
         """,
-            values={"teams": teams, "text": text},
+            values={"teams": teams, "text": text, "status": STATUS_ACTIVE},
             as_dict=1,
         )
         return result
@@ -698,3 +780,10 @@ def get_docs_attached_to(file_name: str):
         filters={"attached_to_doctype": ["is", "set"], "file_url": file.file_url},
         fields=["attached_to_doctype", "attached_to_name"],
     )
+
+def get_upload_path(file_name):
+    root_folder = frappe.get_single("Drive Disk Settings").root_folder or ""
+    uploads_path = Path(frappe.get_site_path("private/files"), root_folder, ".uploads")
+    uploads_path.mkdir(exist_ok=True)
+
+    return uploads_path / file_name

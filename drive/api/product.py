@@ -80,6 +80,9 @@ def get_my_invites():
 
 @frappe.whitelist()
 def get_team_invites(team: str):
+    if not is_admin(team):
+        frappe.throw(_("You don't have the permissions for this action."), frappe.PermissionError)
+
     invites = frappe.db.get_list(
         "Drive User Invitation",
         fields=["creation", "status", "email", "name", "owner"],
@@ -251,6 +254,10 @@ def invite_users(emails: str, team: str = None, as_guest: bool = False, auto: bo
     if not emails:
         return
 
+    # team-less call (share with new user) is gated at its call site
+    if team and not is_admin(team):
+        frappe.throw(_("You don't have the permissions for this action."), frappe.PermissionError)
+
     email_string = validate_email_address(emails, throw=False)
     email_list = split_emails(email_string)
     if not email_list:
@@ -291,11 +298,16 @@ def remove_user(team: str, user_id: str):
     frappe.delete_doc("Drive Team Member", drive_team[user_id].name)
 
 
-# SECURITY: send user data with files
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 @default_team
-def get_all_users(team: str):
-    teams = [team] if team != "all" else get_teams()
+def get_team_users(team: str):
+    user_teams = get_teams()
+    if team == "all":
+        teams = user_teams
+    elif team in user_teams:
+        teams = [team]
+    else:
+        frappe.throw(_("You don't have access to this team."), frappe.PermissionError)
 
     team_users = {}
     for team in teams:
@@ -316,23 +328,6 @@ def get_all_users(team: str):
         u["access_level"] = team_users[u["name"]]
     return users
 
-
-@frappe.whitelist()
-def get_drive_users():
-    users = frappe.get_all(
-        doctype="User",
-        filters=[
-            ["user_type", "=", "Drive User"],
-            ["enabled", "=", 1],
-        ],
-        fields=[
-            "name",
-            "email",
-            "full_name",
-            "user_image",
-        ],
-    )
-    return users
 
 
 @frappe.whitelist(allow_guest=True)
@@ -368,15 +363,19 @@ def get_translations():
     return get_all_translations(language)
 
 
+def is_drive_site_admin():
+    return frappe.has_permission("Drive Disk Settings", "write")
+
+
 @frappe.whitelist()
 def is_site_admin():
-    return {"is_admin": "Drive Admin" in frappe.get_roles()}
+    return {"is_admin": is_drive_site_admin()}
 
 
 @frappe.whitelist(allow_guest=True)
 def disk_settings(**kwargs):
     settings = frappe.get_single("Drive Disk Settings")
-    if not is_site_admin()["is_admin"]:
+    if not is_drive_site_admin():
         # Return only safe values
         return {"preview_size": settings.preview_size, "enabled": settings.enabled}
 
@@ -425,21 +424,3 @@ def after_request(request):
 @frappe.whitelist(allow_guest=True)
 def signup_disabled():
     return frappe.get_website_settings("disable_signup")
-
-
-# SECURITY: all user data is available
-@frappe.whitelist(allow_guest=True)
-def get_drive_users():
-    users = frappe.get_all(
-        doctype="User",
-        filters=[
-            ["enabled", "=", 1],
-        ],
-        fields=[
-            "name",
-            "email",
-            "full_name",
-            "user_image",
-        ],
-    )
-    return users

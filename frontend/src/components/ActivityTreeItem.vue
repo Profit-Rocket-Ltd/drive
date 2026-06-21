@@ -5,9 +5,8 @@
   >
     <svg
       v-if="!strikeThrough && entity.is_folder"
-      class="h-3.5 mr-0.5"
+      class="h-3.5 mr-0.5 fill-ink-gray-5"
       :draggable="false"
-      :style="{ fill: entity.color }"
       width="16"
       height="16"
       viewBox="0 0 16 16"
@@ -40,7 +39,7 @@
   </div>
 </template>
 <script setup>
-import { getIconUrl } from '@/utils/getIconUrl'
+import { getIconUrl } from '@/utils/files'
 
 defineProps({
   title: {

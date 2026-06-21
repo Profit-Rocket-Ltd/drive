@@ -9,7 +9,7 @@
   >
   <div
     v-else
-    class="max-w-[450px] h-fit self-center p-10 bg-surface-white rounded-md text-neutral-100 text-xl text-center font-medium shadow-xl flex flex-col justify-center items-center gap-4"
+    class="max-w-[450px] h-fit self-center p-10 bg-surface-white rounded-md text-xl text-center font-medium shadow-xl flex flex-col justify-center items-center gap-4"
   >
     <div v-if="error" class="text-p-base">
       <LucideSettings class="size-8 mb-6 mx-auto" />
@@ -57,7 +57,7 @@ const error = ref(null)
 const srcUrl = computed(() =>
   encodeURIComponent(
     new URL(
-      `/api/method/drive.api.files.get_file_content?jwt_token=${jwt_token.value}&entity_name=${props.previewEntity.name}&trigger_download=1`,
+      `/api/method/drive.api.files.get_file_content?token=${jwt_token.value}&entity_name=${props.previewEntity.name}&trigger_download=1`,
       window.location.origin
     ).href
   )

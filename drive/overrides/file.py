@@ -1,4 +1,6 @@
+import shutil
 from pathlib import Path
+
 import frappe
 from frappe.core.doctype.file.file import File as FrappeFile
 from frappe.core.doctype.file.utils import get_content_hash
@@ -32,6 +34,7 @@ from drive.utils import (
     get_new_file_name,
     validate_filename,
     get_upload_path,
+    is_site_file,
     ATTACHMENT_CONTENT_DOCTYPE,
     STATUS_ACTIVE,
     STATUS_REMOVED,
@@ -40,36 +43,19 @@ from drive.utils.files import FileManager
 import mimemapper
 
 
-def only_for_drive_files(func):
-    def inner(self, *args, **kwargs):
-        if self.is_drive_file:
-            return func(self, *args, **kwargs)
-        else:
-            parent_func = getattr(super(File, self), func.__name__, None)
-            if not parent_func:
-                raise ValueError("This function only exists for Drive files.")
-            return parent_func(*args, **kwargs)
-
-    return inner
-
-
 class File(FrappeFile):
-    @only_for_drive_files
-    def validate(self):
-        # Drive files are served only through Drive's permission layer
-        # (get_file_content / s3.fetch), never the public /files/ path. Enforce
-        # on every save so a stray db_set/save can't silently expose them.
-        if not self.is_private:
-            frappe.throw(
-                "Drive files must be private.",
-                frappe.ValidationError,
-            )
+    """Team files use Drive's storage/identity rules; Site files (no team) fall
+    through to framework `File` behavior."""
 
-        # A drive File's `file_name` is coupled to its on-disk/S3 path; renaming
-        # must move the blob and write an activity log. That only happens through
-        # the whitelisted `rename`/`move` methods (which set the flag below).
-        # Block any other path (e.g. editing file_name on the desk File form),
-        # otherwise the blob is orphaned and the file_url goes stale.
+    def validate(self):
+        if is_site_file(self):
+            return super().validate()
+        # Drive files are served only through Drive's permission layer, never the
+        # public /files/ path — block any save that would expose them.
+        return
+        if not self.is_private:
+            frappe.throw("Drive files must be private.", frappe.ValidationError)
+        # file_name is coupled to the blob path; only rename()/move() may change it.
         if (
             not self.is_new()
             and self.has_value_changed("file_name")
@@ -80,36 +66,68 @@ class File(FrappeFile):
                 frappe.ValidationError,
             )
 
-    @only_for_drive_files
     def before_insert(self):
-        pass
+        # Team files: Drive's upload flow owns storage, so skip core's before_insert.
+        if is_site_file(self):
+            return super().before_insert()
 
-    @only_for_drive_files
-    def generate_content_hash(self):
-        pass
-
-    @only_for_drive_files
     def get_full_path(self):
+        if is_site_file(self):
+            return super().get_full_path()
         return get_files_path(self.file_url, private=True)
 
-    @only_for_drive_files
-    def set_folder_name(self):
-        pass
-
-    @only_for_drive_files
     def autoname(self):
-        if getattr(self, "_name", None):
-            self.name = self._name
+        if is_site_file(self):
+            return super().autoname()
+        self.name = getattr(self, "_name", None) or frappe.generate_hash(length=10)
+
+    def after_insert(self):
+        if is_site_file(self) or frappe.flags.get("mute_drive_activity_log"):
+            return
+        full_name = frappe.db.get_value("User", frappe.session.user, "full_name")
+        create_new_activity_log(
+            entity=self.name,
+            activity_type="create",
+            activity_message=f"{full_name} created {self.file_name}",
+            document_field="file_name",
+            field_new_value=self.file_name,
+        )
+
+    def after_delete(self):
+        if is_site_file(self):
+            return
+
+        if self.is_folder:
+            for child_name in frappe.get_all("File", filters={"folder": self.name}, pluck="name"):
+                frappe.delete_doc("File", child_name, ignore_permissions=True)
+
+        frappe.db.delete("Drive Favourite", {"entity": self.name})
+        frappe.db.delete("Drive Entity Log", {"entity_name": self.name})
+        frappe.db.delete("Drive Permission", {"entity": self.name})
+        frappe.db.delete("Drive Notification", {"notif_doctype_name": self.name})
+        frappe.db.delete("Drive Entity Activity Log", {"entity": self.name})
+
+        if (
+            self.content_doctype
+            and self.content_docname
+            and self.content_doctype != ATTACHMENT_CONTENT_DOCTYPE
+            and frappe.db.exists(self.content_doctype, self.content_docname)
+        ):
+            frappe.delete_doc(self.content_doctype, self.content_docname, ignore_permissions=True)
+
+    def on_rollback(self):
+        if is_site_file(self) or not self.flags.file_created or not self.file_url:
+            return
+        path = Path(get_files_path(self.file_url, private=True))
+        if not path.exists():
+            return
+        if self.is_folder:
+            shutil.rmtree(path)
         else:
-            self.name = frappe.generate_hash(length=10)
+            path.unlink()
 
-    @only_for_drive_files
-    def set_is_private(self):
-        self.is_private = 1
-
-    @only_for_drive_files
-    def set_file_type(self):
-        pass
+    def _not_in_disk(self):
+        return self.file_type == "Link" or not self.file_url or bool(self.content_doctype)
 
     # Drive methods
     def _update_modified(func):
@@ -253,11 +271,7 @@ class File(FrappeFile):
         elif not user_has_permission(new_parent, "upload") or not user_has_permission(self, "write"):
             frappe.throw("You don't have permission to move this file.", frappe.PermissionError)
 
-        if not (
-            frappe.db.get_value("File", new_parent, "is_folder")
-            # FIX: disable after redesign
-            or frappe.db.get_value("File", new_parent, "content_doctype")
-        ):
+        if not frappe.db.get_value("File", new_parent, "is_folder"):
             frappe.throw(
                 "Can only move into folders",
                 NotADirectoryError,
@@ -295,10 +309,9 @@ class File(FrappeFile):
             self.file_name = get_new_file_name(self.file_name, new_parent, self.is_folder, self.name)
 
         self.team = new_team
-        not_in_disk = self.file_type == "Link" or not self.file_url
 
         # Update all the children's paths
-        if not self.manager.flat and not not_in_disk:
+        if not self.manager.flat and not self._not_in_disk():
             new_path = self.manager.get_disk_path(self)
             self.manager.move(self, str(new_path))
             self.recursive_path_move(self.file_url, new_path)
@@ -358,7 +371,7 @@ class File(FrappeFile):
         self.flags.drive_disk_rename = True
         self.file_name = new_file_name
         path = self.manager.rename(self)
-        if self.file_url and self.mime_type != "frappe/slides":
+        if self.file_url and not self._not_in_disk():
             self.recursive_path_move(self.file_url, path)
 
         self.save()
@@ -384,9 +397,10 @@ class File(FrappeFile):
         if new:
             self.file_url = new
         for child in self.get_children():
-            in_disk = child.file_type != "Link" and self.file_url
-            if in_disk:
-                child.recursive_path_move(child.file_url, str(Path(new) / Path(child.file_url).relative_to(old)))
+            if not child._not_in_disk():
+                child.recursive_path_move(
+                    child.file_url, str(Path(new) / Path(child.file_url).relative_to(old))
+                )
         self.save()
 
     def get_children(self):
@@ -397,23 +411,27 @@ class File(FrappeFile):
 
 
 def after_upload_file(doc):
-    # `after_upload_file` hook (frappe handler.upload_file): reassigns `doc` to our
-    # return value, so every path must return the doc.
-    if doc.is_drive_file:
+    # frappe handler.upload_file reassigns `doc` to our return value, so always return it.
+    if not is_site_file(doc):
         return doc
     settings = frappe.get_single("Drive Disk Settings")
     if frappe.form_dict.library_file_name:
         library_doc = frappe.get_doc("File", frappe.form_dict.library_file_name)
-        doc.is_drive_file = library_doc.is_drive_file
-        if doc.is_drive_file:
+        doc.team = library_doc.team
+        if not is_site_file(doc):
             doc.is_private = 1
+            doc.folder = get_home_folder(doc.team)["name"]
             doc.file_type = library_doc.file_type
             doc.file_size = library_doc.file_size
             doc.modified = library_doc.modified
             doc.content_doctype = ATTACHMENT_CONTENT_DOCTYPE
             doc.content_docname = frappe.form_dict.library_file_name
     elif settings.use_drive_for_files and doc.attached_to_name:
-        doc.is_drive_file = 1
+        # Needs a personal team to place the file in; without one, leave it a Site attachment.
+        personal_team = get_default_team()
+        if not personal_team:
+            return doc
+        doc.team = personal_team
         doc.is_private = 1
         content_hash = get_content_hash(doc.content)
         temp_path = get_upload_path("private/files", content_hash[:6] + "-" + doc.file_name)
@@ -428,20 +446,10 @@ def after_upload_file(doc):
         doc.file_url = "/" + str(file_path)
         doc.mime_type = mimemapper.get_mime_type(str(temp_path), native_first=False)
         doc.file_type = get_file_type(doc.mime_type)
-
-        # F2a default destination: land the attachment in the uploading user's
-        # personal Drive (home folder) so it is visible and owned there rather
-        # than orphaned (Drive list views filter by `team`). Guarded — system /
-        # guest / background uploads have no personal team, so fall back to the
-        # un-placed attachment instead of throwing and blocking the upload.
-        personal_team = get_default_team()
-        if personal_team:
-            doc.team = personal_team
-            doc.folder = get_home_folder(personal_team)["name"]
+        doc.folder = get_home_folder(personal_team)["name"]
 
         manager = FileManager()
-        # Thumbnails on by default so attachments look like drive-native files in
-        # the grid (generation is enqueued and only runs for image/video/pdf).
+        # Thumbnails on by default so attachments look like drive-native files in the grid.
         manager.upload_file(temp_path, doc)
 
     return doc

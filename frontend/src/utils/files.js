@@ -3,7 +3,7 @@ import store from '@/store'
 import { formatSize } from '@/utils/format'
 import { nextTick } from 'vue'
 import { useTimeAgo } from '@vueuse/core'
-import { getFileLink } from 'frappe-ui/drive/js/utils'
+import { getFileLink } from '@/ui/drive/js/utils'
 import {
   getRecents,
   mutate,
@@ -12,15 +12,85 @@ import {
 } from '@/resources/files'
 import { getTeams, getPublicTeams } from '@/resources/files'
 import { set } from 'idb-keyval'
-import slugify from 'slugify'
 import { toast } from '@/utils/toasts.js'
 import { useFileUpload, toast as nToast } from 'frappe-ui'
 import emitter from '@/emitter'
 
+import folderIcon from '@icons/folder.svg'
+import imageIcon from '@icons/image.svg'
+import pdfIcon from '@icons/pdf.svg'
+import photoshopIcon from '@icons/photoshop.svg'
+import codeIcon from '@icons/code.svg'
+import sketchIcon from '@icons/sketch.svg'
+import markdownIcon from '@icons/markdown.svg'
+import textIcon from '@icons/text.svg'
+import documentIcon from '@icons/document.svg'
+import spreadsheetIcon from '@icons/spreadsheet.svg'
+import presentationIcon from '@icons/presentation.svg'
+import audioIcon from '@icons/audio.svg'
+import videoIcon from '@icons/video.svg'
+import applicationIcon from '@icons/application.svg'
+import archiveIcon from '@icons/archive.svg'
+import unknownIcon from '@icons/unknown.svg'
+
+const FILE_ICONS = {
+  Folder: folderIcon,
+  Image: imageIcon,
+  PDF: pdfIcon,
+  Photoshop: photoshopIcon,
+  Code: codeIcon,
+  Sketch: sketchIcon,
+  Markdown: markdownIcon,
+  Text: textIcon,
+  Document: documentIcon,
+  Spreadsheet: spreadsheetIcon,
+  Presentation: presentationIcon,
+  Audio: audioIcon,
+  Video: videoIcon,
+  Application: applicationIcon,
+  Archive: archiveIcon,
+}
+
+export const WRITER_CONTENT_DOCTYPE = 'Writer Document'
+export const PRESENTATION_CONTENT_DOCTYPE = 'Presentation'
+export const ATTACHMENT_CONTENT_DOCTYPE = 'File'
+
+export function isWriterDocument(entity) {
+  return entity?.content_doctype === WRITER_CONTENT_DOCTYPE
+}
+
+export function isPresentation(entity) {
+  return entity?.content_doctype === PRESENTATION_CONTENT_DOCTYPE
+}
+
+export function hasHostedContent(entity) {
+  return isWriterDocument(entity) || isPresentation(entity)
+}
+
+export function isManaged(entity) {
+  return entity?.kind === 'native'
+}
+
+export function isReadonly(entity) {
+  return entity?.kind === 'readonly'
+}
+
+export function isSiteFile(entity) {
+  return !entity?.team
+}
+
+export function isAttachmentRef(entity) {
+  return entity?.content_doctype === ATTACHMENT_CONTENT_DOCTYPE
+}
+
+export function isVirtual(entity) {
+  return entity?.kind === 'virtual'
+}
+
 export const openEntity = (entity, new_tab = false) => {
   // Virtual grouping node: navigate into its attachments bucket. A node with an
   // attached_to_name drills into a single document; otherwise into a doctype.
-  if (entity.kind === 'virtual') {
+  if (isVirtual(entity)) {
     return router.push({
       name: 'Attachments',
       params: entity.attached_to_name
@@ -287,6 +357,20 @@ export const setBreadCrumbs = (entity) => {
   store.commit('setBreadcrumbs', res)
 }
 
+export function getIconUrl(file_type) {
+  return FILE_ICONS[file_type] ?? unknownIcon
+}
+
+// `src` is the thumbnail (images/videos/PDFs) or the icon; `fallback` is the icon.
+export function getThumbnailUrl({ name, file_type, thumbnail, external }, view = 'list') {
+  const fallback = getIconUrl(file_type ?? 'Presentation')
+  let src = ''
+  if (external) src = view !== 'list' ? thumbnail : ''
+  else if (['Image', 'Video', 'PDF'].includes(file_type))
+    src = `/api/method/drive.api.files.get_thumbnail?entity_name=${name}`
+  return { src: src || fallback, fallback }
+}
+
 export const MIME_LIST_MAP = {
   Folder: [],
   Image: [
@@ -416,11 +500,13 @@ export function enterFullScreen() {
 }
 
 function slugger(file_name) {
-  return slugify(file_name.split('.').join(' '), {
-    lower: true,
-    trim: true,
-    remove: /[^\w\s\']|_/,
-  })
+  return file_name
+    .split('.')
+    .join(' ')
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s']|_/g, '')
+    .replace(/\s+/g, '-')
 }
 
 function getLinkStem(entity) {
@@ -428,7 +514,7 @@ function getLinkStem(entity) {
     {
       true: 'f',
       [new Boolean(entity.is_folder)]: 'd',
-      [new Boolean(entity.doc || entity.mime_type === 'text/markdown')]: 'w',
+      [new Boolean(isWriterDocument(entity) || entity.mime_type === 'text/markdown')]: 'w',
     }[true]
   }/${entity.name}/${slugger(entity.file_name)}`
 }
@@ -482,7 +568,7 @@ export function getLink(entity, copy = true, withDomain = true) {
     if (err.name === 'NotAllowedError') {
       toast({
         icon: 'alert-triangle',
-        iconClasses: 'text-red-700',
+        iconClasses: 'text-ink-red-3',
         title: 'Clipboard permission denied',
         position: 'bottom-right',
       })

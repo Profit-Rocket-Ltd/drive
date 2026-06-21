@@ -1,11 +1,6 @@
 <template>
-  <FrappeListView
-    ref="container"
-    class="relative select-none p-5 md:pb-15"
-    row-key="name"
-    :columns="selectedColumns"
-    :rows="formattedRows"
-    :options="{
+  <FrappeListView ref="container" class="relative select-none p-5 md:pb-15" row-key="name" :columns="selectedColumns"
+    :rows="formattedRows" :options="{
       selectable: true,
       enableActive: true,
       showTooltip: true,
@@ -14,39 +9,20 @@
       emptyState: {
         description: 'Nothing found - try something else?',
       },
-    }"
-    @update:selections="handleSelections"
-    @update:active-row="setActive"
-  >
+    }" @update:selections="handleSelections" @update:active-row="setActive">
     <ListHeader class="mb-[1px]" />
-    <div
-      v-if="!folderContents"
-      class="w-full text-center flex items-center justify-center py-10"
-    >
+    <div v-if="!folderContents" class="w-full text-center flex items-center justify-center py-10">
       <LoadingIndicator class="w-8" />
     </div>
     <template v-else>
       <div class="h-full overflow-y-auto">
         <ListEmptyState v-if="!formattedRows.length" />
-        <div
-          v-for="group in formattedRows"
-          v-else-if="formattedRows[0].group"
-          :key="group.group"
-        >
+        <div v-for="group in formattedRows" v-else-if="formattedRows[0].group" :key="group.group">
           <ListGroupHeader :group="group">
-            <slot
-              v-if="$slots['group-header']"
-              name="group-header"
-              v-bind="{ group }"
-            />
+            <slot v-if="$slots['group-header']" name="group-header" v-bind="{ group }" />
           </ListGroupHeader>
           <ListGroupRows :group="group">
-            <CustomListRow
-              :rows="group.rows"
-              :context-menu="contextMenu"
-              :selections
-              @dropped="emit('dropped')"
-            />
+            <CustomListRow :rows="group.rows" :context-menu="contextMenu" :selections @dropped="emit('dropped')" />
           </ListGroupRows>
         </div>
         <div v-else class="pb-8">
@@ -60,14 +36,8 @@
       </div>
     </template>
   </FrappeListView>
-  <ContextMenu
-    v-if="rowEvent && selectedRow"
-    :key="selectedRow.name"
-    v-on-outside-click="() => (rowEvent = false)"
-    :close="() => (rowEvent = false)"
-    :action-items="dropdownActionItems(selectedRow)"
-    :event="rowEvent"
-  />
+  <ContextMenu v-if="rowEvent && selectedRow" :key="selectedRow.name" v-on-outside-click="() => (rowEvent = false)"
+    :close="() => (rowEvent = false)" :action-items="dropdownActionItems(selectedRow)" :event="rowEvent" />
 </template>
 <script setup>
 import {
@@ -80,14 +50,17 @@ import {
   Avatar,
   Tooltip,
 } from 'frappe-ui'
-import { getThumbnailUrl } from '@/utils/getIconUrl'
 import { useStore } from 'vuex'
 import { useRoute } from 'vue-router'
 import { computed, h, ref, watch, useTemplateRef } from 'vue'
 import ContextMenu from '@/components/ContextMenu.vue'
 import CustomListRow from './CustomListRow.vue'
-import { openEntity, isModKey, getLink } from '@/utils/files'
+import { openEntity, isModKey, getLink, getThumbnailUrl } from '@/utils/files'
 import { formatDate } from '@/utils/format'
+import {
+  WRITER_CONTENT_DOCTYPE,
+  PRESENTATION_CONTENT_DOCTYPE,
+} from '@/utils/files'
 
 import { onKeyDown } from '@vueuse/core'
 import emitter from '@/emitter'
@@ -100,7 +73,6 @@ const route = useRoute()
 const props = defineProps({
   folderContents: Object,
   actionItems: Array,
-  userData: Object,
   rootEntity: Object,
 })
 const emit = defineEmits(['dropped'])
@@ -127,28 +99,37 @@ const selectedColumns = [
   {
     label: __('Name'),
     key: 'file_name',
-    getLabel: ({ row: { file_name, is_folder, document } }) =>
-      file_name.lastIndexOf('.') === -1 || is_folder || document
+    getLabel: ({ row: { file_name, is_folder, content_doctype } }) =>
+      file_name.lastIndexOf('.') === -1 ||
+      is_folder ||
+      content_doctype === WRITER_CONTENT_DOCTYPE ||
+      content_doctype === PRESENTATION_CONTENT_DOCTYPE
         ? file_name
         : file_name.slice(0, file_name.lastIndexOf('.')),
-    getTooltip: (e) => (e.is_folder || e.document ? '' : e.file_name),
+    getTooltip: (e) =>
+      e.is_folder ||
+      e.content_doctype === WRITER_CONTENT_DOCTYPE ||
+      e.content_doctype === PRESENTATION_CONTENT_DOCTYPE
+        ? ''
+        : e.file_name,
     prefix: ({ row }) => {
       return getThumbnailUrl(row)
     },
     suffix: ({ row }) => {
       if (row.share_count === props.rootEntity?.share_count) return
-      if (row.share_count === -2)
+      if (row.share_count === -2) {
         return h(Tooltip, { text: __('Public') }, {
           default: () => h(LucideGlobe2, { class: 'size-4' })
         })
-      else if (row.share_count === -1)
+      } else if (row.share_count === -1) {
         return h(Tooltip, { text: __('Organization') }, {
           default: () => h(LucideBuilding2, { class: 'size-4' })
         })
-      else if (row.share_count > 0)
+      } else if (row.share_count > 0) {
         return h(Tooltip, { text: __('Shared with {0} users', [row.share_count]) }, {
           default: () => h(LucideUsers, { class: 'size-4' })
         })
+      }
     },
   },
   {
@@ -156,18 +137,15 @@ const selectedColumns = [
     key: '',
     getLabel: ({ row }) =>
       row.owner === store.state.user.id
-        ? 'You'
-        : props.userData[row.owner]?.full_name || row.owner || '-',
+        ? __('You')
+        : row.owner_full_name || row.owner || '-',
     isEnabled: (n) => n !== 'Attachments',
     prefix: ({ row }) => {
       if (!row.owner) return
       return h(Avatar, {
         shape: 'circle',
-        image: props.userData[row.owner]?.user_image,
-        label:
-          props.userData[row.owner]?.full_name ||
-          props.userData[row.owner]?.email ||
-          row.owner,
+        image: row.owner_image,
+        label: row.owner_full_name || row.owner,
         size: 'sm',
       })
     },

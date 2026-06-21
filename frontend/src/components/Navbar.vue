@@ -27,10 +27,10 @@
         v-if="rootEntity?.is_favourite"
         width="16"
         height="16"
-        class="my-auto stroke-amber-500 fill-amber-500"
+        class="my-auto text-ink-amber-3 stroke-current fill-current"
       />
       <template v-if="!isLoggedIn && !inIframe">
-        <Button variant="outline" @click="$router.push({ name: 'Login' })"> Sign In </Button>
+        <Button variant="outline" @click="redirectLogin">Sign In</Button>
         <Button
           class="hidden md:block"
           variant="solid"
@@ -98,8 +98,15 @@ import { entitiesDownload } from '@/utils/download'
 import { getRecents, getTrash, toggleFav } from '@/resources/files'
 import { apps } from '@/resources/permissions'
 import { useRoute } from 'vue-router'
-import { newExternal, dynamicList } from '@/utils/files'
-import { getFileLink } from 'frappe-ui/drive/js/utils'
+import {
+  newExternal,
+  dynamicList,
+  isManaged,
+  isAttachmentRef,
+  isSiteFile,
+  isVirtual,
+} from '@/utils/files'
+import { getFileLink } from '@/ui/drive/js/utils'
 
 import LucideClock from '~icons/lucide/clock'
 import LucideHome from '~icons/lucide/home'
@@ -159,7 +166,7 @@ const defaultActions = computed(() => {
           label: __('Open in Desk'),
           icon: LucideMonitorCog,
           onClick: () => window.open('/desk/file/' + rootEntity.value.name, '_blank'),
-          isEnabled: () => rootEntity.value.kind === 'foreign' && store.state.user.systemUser,
+          isEnabled: () => isSiteFile(rootEntity.value) && store.state.user.systemUser,
         },
         {
           label: __('Go to original'),
@@ -170,7 +177,15 @@ const defaultActions = computed(() => {
               '_blank'
             )
           },
-          isEnabled: () => rootEntity.value.kind === 'reference',
+          isEnabled: () => isAttachmentRef(rootEntity.value),
+        },
+        {
+          label: __('Download'),
+          icon: LucideDownload,
+          isEnabled: () =>
+            !isVirtual(rootEntity.value) &&
+            !['Link', 'Presentation', 'Document'].includes(rootEntity.value.file_type),
+          onClick: () => entitiesDownload([rootEntity.value]),
         },
         {
           label: __('Copy Link'),
@@ -182,11 +197,6 @@ const defaultActions = computed(() => {
           icon: LucideInfo,
           onClick: () => (dialog.value = 'i'),
           isEnabled: () => !store.state.activeEntity || !store.state.showInfo,
-        },
-        {
-          label: __('Download'),
-          icon: LucideDownload,
-          onClick: () => entitiesDownload(route.params.team, [rootEntity.value]),
         },
       ],
     },
@@ -200,19 +210,19 @@ const defaultActions = computed(() => {
           onClick: () => {
             dialog.value = 's'
           },
-          isEnabled: () => rootEntity.value.share && rootEntity.value.kind === 'native',
+          isEnabled: () => rootEntity.value.share && isManaged(rootEntity.value),
         },
         {
           label: __('Rename'),
           icon: LucideSquarePen,
           onClick: () => (dialog.value = 'rn'),
-          isEnabled: () => rootEntity.value.write && rootEntity.value.kind === 'native',
+          isEnabled: () => rootEntity.value.write && isManaged(rootEntity.value),
         },
         {
           label: __('Move'),
           icon: LucideArrowLeftRight,
           onClick: () => (dialog.value = 'm'),
-          isEnabled: () => rootEntity.value.write && rootEntity.value.kind === 'native',
+          isEnabled: () => rootEntity.value.write && isManaged(rootEntity.value),
         },
         {
           label: __('Favourite'),
@@ -228,7 +238,7 @@ const defaultActions = computed(() => {
         {
           label: __('Unfavourite'),
           icon: LucideStar,
-          color: 'stroke-amber-500 fill-amber-500',
+          color: 'text-ink-amber-3 stroke-current fill-current',
           onClick: () => {
             rootEntity.value.is_favourite = false
             toggleFav.submit({
@@ -324,4 +334,8 @@ const newEntityOptions = computed(() => [
 ])
 
 const inIframe = inject('inIframe')
+const redirectLogin = () => {
+  window.location.href =
+    '/login?redirect-to=' + encodeURIComponent('/drive' + route.path)
+}
 </script>
